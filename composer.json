@@ -1,0 +1,10 @@
+{
+    "name": "distantmagic/swoole-futures",
+    "license": "MIT",
+    "autoload": {
+        "psr-4": {
+            "Distantmagic\\SwooleFuture\\": "src/"
+        }
+    },
+    "require": {}
+}
