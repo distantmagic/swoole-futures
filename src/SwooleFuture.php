@@ -24,6 +24,7 @@ final class SwooleFuture
 
     private mixed $result = null;
     private PromiseState $state = PromiseState::Pending;
+    private float $timeout;
 
     /**
      * To be used by the framework users.
@@ -39,6 +40,9 @@ final class SwooleFuture
         $this->executor = $executor instanceof Closure
             ? $executor
             : Closure::fromCallable($executor);
+        $this->timeout = defined('DM_GRAPHQL_PROMISE_TIMEOUT')
+            ? (float) DM_GRAPHQL_PROMISE_TIMEOUT
+            : 0.3;
     }
 
     public function resolve(mixed $value): SwooleFutureResult
@@ -71,7 +75,7 @@ final class SwooleFuture
             throw new LogicException('Unable to start an executor Coroutine');
         }
 
-        if (!$waitGroup->wait(DM_GRAPHQL_PROMISE_TIMEOUT)) {
+        if (!$waitGroup->wait($this->timeout)) {
             return $this->reportWaitGroupFailure();
         }
 
@@ -117,7 +121,7 @@ final class SwooleFuture
             if (
                 !$this->state->isSettled()
                 && !is_null($waitGroup)
-                && !$waitGroup->wait(DM_GRAPHQL_PROMISE_TIMEOUT)
+                && !$waitGroup->wait($this->timeout)
             ) {
                 return $this->reportWaitGroupFailure();
             }
