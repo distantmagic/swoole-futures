@@ -11,6 +11,9 @@ SHELL_PWD := $(shell pwd)
 tools/php-cs-fixer/vendor/bin/php-cs-fixer:
 	$(MAKE) -C tools/php-cs-fixer vendor
 
+tools/psalm/vendor/bin/psalm:
+	$(MAKE) -C tools/psalm vendor
+
 vendor: composer.lock
 	${PHP_BIN} ${COMPOSER_BIN} install --no-interaction --prefer-dist --optimize-autoloader;
 	touch vendor;
@@ -27,21 +30,12 @@ php-cs-fixer: tools/php-cs-fixer/vendor/bin/php-cs-fixer
 	./tools/php-cs-fixer/vendor/bin/php-cs-fixer --allow-risky=yes fix
 
 .PHONY: phpunit
-phpunit: config.ini vendor
+phpunit: vendor
 	./vendor/bin/phpunit
 
 .PHONY: psalm
-psalm: config.ini vendor
-	./vendor/bin/psalm --no-cache --show-info=true
-
-.PHONY: psalm.watch
-psalm.watch: node_modules vendor
-	./node_modules/.bin/nodemon \
-		--ext ini,php \
-		--signal SIGTERM \
-		--watch ./app \
-		--watch ./src \
-		--watch ./config.schema.php \
-		--watch ./constants.php \
-		--watch ./resonance \
-		--exec '$(MAKE) psalm || exit 1'
+psalm: tools/psalm/vendor/bin/psalm
+	./tools/psalm/vendor/bin/psalm \
+		--no-cache \
+		--show-info=true \
+		--root=$(CURDIR)

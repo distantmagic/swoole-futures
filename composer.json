@@ -8,5 +8,8 @@
     },
     "require": {
         "webonyx/graphql-php": "^15.6.0"
+    },
+    "require-dev": {
+        "swoole/ide-helper": "^5.1"
     }
 }
