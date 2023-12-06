@@ -7,7 +7,7 @@ namespace Distantmagic\SwooleFuture;
 use Closure;
 use Ds\Set;
 use GraphQL\Executor\Promise\Promise;
-use LogicException;
+use RuntimeException;
 use Swoole\Coroutine\WaitGroup;
 use Throwable;
 
@@ -18,9 +18,9 @@ final class SwooleFuture
     public readonly Closure $executor;
 
     /**
-     * @var Set<WaitGroup> $awaitingThenables
+     * @var Set<WaitGroup> $awaitingGroups
      */
-    private Set $awaitingThenables;
+    private Set $awaitingGroups;
 
     private mixed $result = null;
     private PromiseState $state = PromiseState::Pending;
@@ -36,7 +36,7 @@ final class SwooleFuture
 
     public function __construct(callable $executor)
     {
-        $this->awaitingThenables = new Set();
+        $this->awaitingGroups = new Set();
         $this->executor = $executor instanceof Closure
             ? $executor
             : Closure::fromCallable($executor);
@@ -45,42 +45,65 @@ final class SwooleFuture
             : 0.3;
     }
 
+    public function getResult(): mixed
+    {
+        if (!$this->state->isSettled()) {
+            throw new RuntimeException('Promise is not settled');
+        }
+
+        return $this->result;
+    }
+
+    public function getState(): PromiseState
+    {
+        return $this->state;
+    }
+
     public function resolve(mixed $value): SwooleFutureResult
     {
         if (PromiseState::Resolving === $this->state) {
-            throw new LogicException('SwooleFuture is currently resolving');
+            throw new RuntimeException('SwooleFuture is currently resolving');
         }
 
         if (PromiseState::Pending !== $this->state) {
-            throw new LogicException('SwooleFuture is already resolved');
+            throw new RuntimeException('SwooleFuture is already resolved');
         }
 
         $this->state = PromiseState::Resolving;
 
-        $waitGroup = new WaitGroup(1);
+        if ($value instanceof SwooleFutureResult) {
+            $this->result = match ($value->state) {
+                PromiseState::Fulfilled,
+                PromiseState::Rejected => $value->state,
+                default => throw new RuntimeException('Unexpected Future state: '.((string) $value->state)),
+            };
+            $this->result = $value->result;
+        } else {
+            $waitGroup = new WaitGroup(1);
 
-        $cid = go(function () use (&$value, $waitGroup) {
-            try {
-                $this->result = ($this->executor)($value);
-                $this->state = PromiseState::Fulfilled;
-            } catch (Throwable $throwable) {
-                $this->result = $throwable;
-                $this->state = PromiseState::Rejected;
-            } finally {
-                $waitGroup->done();
+            $cid = go(function () use (&$value, $waitGroup) {
+                try {
+                    $this->result = ($this->executor)($value);
+                    $this->state = PromiseState::Fulfilled;
+                } catch (Throwable $throwable) {
+                    $this->result = $throwable;
+                    $this->state = PromiseState::Rejected;
+                } finally {
+                    $waitGroup->done();
+                }
+            });
+
+            if (!is_int($cid)) {
+                throw new RuntimeException('Unable to start an executor Coroutine');
             }
-        });
 
-        if (!is_int($cid)) {
-            throw new LogicException('Unable to start an executor Coroutine');
-        }
-
-        if (!$waitGroup->wait($this->timeout)) {
-            return $this->reportWaitGroupFailure();
+            if (!$waitGroup->wait($this->timeout)) {
+                return $this->reportWaitGroupFailure();
+            }
         }
 
         if (!$this->state->isSettled()) {
-            throw new LogicException('Unexpected non-settled state');
+            throw new RuntimeException('Unexpected non-settled state');
         }
 
         $this->unwrapResult();
@@ -88,11 +111,11 @@ final class SwooleFuture
         /**
          * Both state and result are settled and final
          */
-        foreach ($this->awaitingThenables as $awaitingThenable) {
+        foreach ($this->awaitingGroups as $awaitingThenable) {
             $awaitingThenable->done();
         }
 
-        $this->awaitingThenables->clear();
+        $this->awaitingGroups->clear();
 
         return new SwooleFutureResult($this->state, $this->result);
     }
@@ -100,14 +123,13 @@ final class SwooleFuture
     public function then(?self $onFulfilled, ?self $onRejected): self
     {
         if (is_null($onFulfilled) && is_null($onRejected)) {
-            throw new LogicException('Must provide at least one chain callback');
+            throw new RuntimeException('Must provide at least one chain callback');
         }
 
-        $waitGroup = $this->state->isSettled() ? null : new WaitGroup();
-        $waitGroup?->add();
+        $waitGroup = $this->state->isSettled() ? null : new WaitGroup(1);
 
         if ($waitGroup) {
-            $this->awaitingThenables->add($waitGroup);
+            $this->awaitingGroups->add($waitGroup);
         }
 
         return new self(function (mixed $value) use ($onFulfilled, $onRejected, $waitGroup) {
@@ -126,10 +148,10 @@ final class SwooleFuture
                 return $this->reportWaitGroupFailure();
             }
 
-            $this->awaitingThenables->clear();
+            $this->awaitingGroups->clear();
 
             if (!$this->state->isSettled()) {
-                throw new LogicException('Cannot chain non-settled Future: '.$this->state->name);
+                throw new RuntimeException('Cannot chain non-settled Future: '.$this->state->name);
             }
 
             if (PromiseState::Fulfilled === $this->state && $onFulfilled) {
@@ -144,18 +166,35 @@ final class SwooleFuture
         });
     }
 
+    public function wait(?float $timeout = null): void
+    {
+        if ($this->state->isSettled()) {
+            return;
+        }
+
+        $waitGroup = new WaitGroup(1);
+
+        $this->awaitingGroups->add($waitGroup);
+
+        $waitGroupTimeout = is_null($timeout) ? $this->timeout : $timeout;
+
+        if (!$waitGroup->wait($waitGroupTimeout)) {
+            throw new RuntimeException('WaitGroup timeout');
+        }
+    }
+
     private function reportWaitGroupFailure(): SwooleFutureResult
     {
         return new SwooleFutureResult(
             PromiseState::Rejected,
-            new LogicException('WaitGroup failed while resolving promise (likely due to a timeout)'),
+            new RuntimeException('WaitGroup failed while resolving promise (likely due to a timeout)'),
         );
     }
 
     private function unwrapResult(int $nestingLimit = 3): void
     {
         if ($nestingLimit < 0) {
-            throw new LogicException('SwooleFuture\'s result is to deeply nested');
+            throw new RuntimeException('SwooleFuture\'s result is to deeply nested');
         }
 
         /**
@@ -178,7 +217,7 @@ final class SwooleFuture
 
                 $this->unwrapResult($nestingLimit - 1);
             } else {
-                throw new LogicException('SwooleFuture is not fully resolved.');
+                throw new RuntimeException('SwooleFuture is not fully resolved.');
             }
         }
     }
