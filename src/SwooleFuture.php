@@ -75,7 +75,7 @@ final class SwooleFuture
             $this->result = match ($value->state) {
                 PromiseState::Fulfilled,
                 PromiseState::Rejected => $value->state,
-                default => throw new RuntimeException('Unexpected Future state: '.((string) $value->state)),
+                default => throw new RuntimeException('Unexpected Future state: '.$value->state->name),
             };
             $this->result = $value->result;
         } else {
